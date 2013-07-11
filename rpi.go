@@ -84,10 +84,15 @@ const (
 	BCM2835_GPIO_FSEL_MASK uint32 = 0x7
 
 	GPIO_P1_22 = 25
+
+	BCM2835_SPI0_TA   = 1 << 7
+	BCM2835_SPI0_RXR  = 1 << 19
+	BCM2835_SPI0_DONE = 1 << 16
 )
 
 var (
 	gpfsel, gpset, gpclr, gplev []*uint32
+	spics, spififo, spiclk      *uint32
 )
 
 func init() {
@@ -95,40 +100,50 @@ func init() {
 	if err != nil {
 		log.Fatalf("rpi: unable to open /dev/mem: %v", err)
 	}
-	buf, err := syscall.Mmap(int(memfd.Fd()), BCM2835_GPIO_BASE, BCM2835_BLOCK_SIZE, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	gpioBuf, err := syscall.Mmap(int(memfd.Fd()), BCM2835_GPIO_BASE, BCM2835_BLOCK_SIZE, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
 		log.Fatalf("rpi: unable to mmap GPIO page: %v", err)
 	}
+	spiBuf, err := syscall.Mmap(int(memfd.Fd()), BCM2835_SPI0_BASE, BCM2835_BLOCK_SIZE, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		log.Fatalf("rpi: unable to mmap SPI page: %v", err)
+	}
+
+	spics = (*uint32)(unsafe.Pointer(&spiBuf[0]))
+	spififo = (*uint32)(unsafe.Pointer(&spiBuf[4]))
+	spiclk = (*uint32)(unsafe.Pointer(&spiBuf[8]))
+
 	gpfsel = []*uint32{
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL0])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL1])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL2])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL3])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL4])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPFSEL5])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL0])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL1])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL2])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL3])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL4])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPFSEL5])),
 	}
 	gpset = []*uint32{
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPSET0])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPSET1])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPSET0])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPSET1])),
 	}
 	gpclr = []*uint32{
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPCLR0])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPCLR1])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPCLR0])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPCLR1])),
 	}
 	gplev = []*uint32{
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPLEV0])),
-		(*uint32)(unsafe.Pointer(&buf[BCM2835_GPLEV1])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPLEV0])),
+		(*uint32)(unsafe.Pointer(&gpioBuf[BCM2835_GPLEV1])),
 	}
 }
 
 func GPIOFSel(pin, mode uint8) {
 	offset := pin / 10
 	shift := (pin % 10) * 3
-	value := *gpfsel[offset]
+	val := *gpfsel[offset]
 	mask := BCM2835_GPIO_FSEL_MASK << shift
-	value &= ^uint32(mask)
-	value |= uint32(mode) << shift
-	*gpfsel[offset] = value & mask
+	val &= ^uint32(mask)
+	value := uint32(mode) << shift
+	val |= value
+	*gpfsel[offset] = val
 }
 
 func GPIOSet(pin uint8) {
@@ -147,4 +162,36 @@ func GPIOGet(pin uint8) bool {
 	offset := pin / 32
 	shift := pin % 32
 	return *gplev[offset]&(1<<shift) == (1 << shift)
+}
+
+func SPITransferStart() {
+	reg := *spics
+	reg |= uint32(BCM2835_SPI0_TA)
+	*spics = reg
+}
+
+func SPITransferStop() {
+	reg := *spics
+	reg &= ^uint32(BCM2835_SPI0_TA)
+	*spics = reg
+}
+
+func SPIWrite(byte uint8) {
+	*spififo = uint32(byte)
+	for {
+		reg := *spics
+		for reg&(BCM2835_SPI0_RXR) == (BCM2835_SPI0_RXR) {
+			_ = *spififo
+			reg = *spics
+		}
+
+		if reg&(BCM2835_SPI0_DONE) == (BCM2835_SPI0_DONE) {
+			break
+		}
+	}
+}
+
+func SetSPIRegs() {
+	*spiclk = 0x80 // Set clock divider to produce 4 MHz clock
+	*spics = 0x40000
 }
